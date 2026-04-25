@@ -1,0 +1,44 @@
+# Build output
+build/
+out/
+bin/
+obj/
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.obj
+*.lib
+*.dll
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln.docstates
+*.vcxproj.user
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+Testing/
+
+# IDE
+.vscode/
+.idea/
+
+# Compiled shaders
+*.cso
+*.fxc
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Assets too big to commit (manage separately)
+assets/models/*.gltf
+assets/models/*.bin
+assets/textures/*.dds
