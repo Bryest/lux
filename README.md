@@ -1,5 +1,7 @@
 # lux
 
+![demo](media/lux-cubes.gif)
+
 Real-time DirectX 12 renderer written from scratch in C++. Built as a learning project and portfolio piece toward a graphics programmer role.
 
 **Author:** Renato Castillo — started 2026-04-20
