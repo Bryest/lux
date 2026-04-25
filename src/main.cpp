@@ -8,6 +8,7 @@
 #include <wrl.h>
 #include <d3dcompiler.h>
 #include "d3dx12.h"
+#include "mesh.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -20,9 +21,6 @@ using Microsoft::WRL::ComPtr;
 constexpr UINT kBackBufferCount = 2;
 constexpr UINT kWidth           = 1280;
 constexpr UINT kHeight          = 720;
-constexpr UINT kMaxCubes        = 8;
-
-struct Vertex { float position[3]; float color[4]; };
 
 struct SceneConstants {
     glm::mat4 mvp;
@@ -31,9 +29,9 @@ struct SceneConstants {
 static_assert(sizeof(SceneConstants) == 256);
 
 struct Camera {
-    glm::vec3 pos   = { 0.0f, 1.5f, -5.0f };
+    glm::vec3 pos   = { 0.0f, 1.0f, -4.0f };
     float     yaw   = 0.0f;
-    float     pitch = -0.2f;
+    float     pitch = -0.1f;
 
     glm::vec3 forward() const {
         return { cosf(pitch) * sinf(yaw), sinf(pitch), cosf(pitch) * cosf(yaw) };
@@ -46,8 +44,6 @@ struct Camera {
     }
 };
 
-struct CubeDef { glm::vec3 pos; float rotSpeed; glm::vec3 axis; };
-
 // --- D3D12 state ---
 ComPtr<ID3D12Device>              g_device;
 ComPtr<ID3D12CommandQueue>        g_commandQueue;
@@ -59,14 +55,10 @@ ComPtr<ID3D12GraphicsCommandList> g_commandList;
 ComPtr<ID3D12Fence>               g_fence;
 ComPtr<ID3D12RootSignature>       g_rootSignature;
 ComPtr<ID3D12PipelineState>       g_pipelineState;
-ComPtr<ID3D12Resource>            g_vertexBuffer;
-ComPtr<ID3D12Resource>            g_indexBuffer;
 ComPtr<ID3D12DescriptorHeap>      g_dsvHeap;
 ComPtr<ID3D12Resource>            g_depthBuffer;
 ComPtr<ID3D12Resource>            g_constantBuffer;
 UINT8*                            g_cbMapped      = nullptr;
-D3D12_VERTEX_BUFFER_VIEW          g_vbv           = {};
-D3D12_INDEX_BUFFER_VIEW           g_ibv           = {};
 D3D12_VIEWPORT                    g_viewport      = {};
 D3D12_RECT                        g_scissor       = {};
 UINT64  g_fenceValue        = 0;
@@ -79,18 +71,11 @@ HWND    g_hwnd              = nullptr;
 
 // --- Scene state ---
 Camera g_camera;
+Mesh   g_mesh;
 float  g_moveSpeed  = 3.0f;
 bool   g_mouseLook  = false;
 int    g_lastMouseX = 0;
 int    g_lastMouseY = 0;
-
-CubeDef g_cubes[] = {
-    {{ 0.0f,  0.0f,  0.0f }, 1.0f, { 1.0f, 1.0f, 0.5f }},
-    {{ 2.5f,  0.0f,  0.0f }, 0.7f, { 0.5f, 1.0f, 0.8f }},
-    {{-2.5f,  0.0f,  0.0f }, 1.3f, { 1.0f, 0.5f, 1.0f }},
-    {{ 0.0f,  2.0f,  0.0f }, 0.8f, { 0.7f, 0.7f, 1.0f }},
-};
-constexpr UINT kCubeCount = (UINT)(sizeof(g_cubes) / sizeof(g_cubes[0]));
 
 void WaitForGPU() {
     ++g_fenceValue;
@@ -221,7 +206,6 @@ void InitD3D12(HWND hwnd) {
 }
 
 void InitScene() {
-    // Root signature: 1 CBV at b0
     CD3DX12_ROOT_PARAMETER rp[1];
     rp[0].InitAsConstantBufferView(0);
     CD3DX12_ROOT_SIGNATURE_DESC rsd;
@@ -230,7 +214,6 @@ void InitScene() {
     D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr);
     g_device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature));
 
-    // Shaders
     ComPtr<ID3DBlob> vsBlob, psBlob, errBlob;
     UINT flags = 0;
 #ifdef _DEBUG
@@ -239,10 +222,10 @@ void InitScene() {
     D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", flags, 0, &vsBlob, &errBlob);
     D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", flags, 0, &psBlob, &errBlob);
 
-    // PSO
     D3D12_INPUT_ELEMENT_DESC layout[] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,                            D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
@@ -250,7 +233,9 @@ void InitScene() {
     pd.pRootSignature        = g_rootSignature.Get();
     pd.VS                    = CD3DX12_SHADER_BYTECODE(vsBlob.Get());
     pd.PS                    = CD3DX12_SHADER_BYTECODE(psBlob.Get());
-    pd.RasterizerState       = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    auto rs = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    rs.FrontCounterClockwise = TRUE; // OBJ from Blender uses CCW winding
+    pd.RasterizerState       = rs;
     pd.BlendState            = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     pd.DepthStencilState     = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     pd.SampleMask            = UINT_MAX;
@@ -261,65 +246,21 @@ void InitScene() {
     pd.SampleDesc.Count      = 1;
     g_device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_pipelineState));
 
-    // Cube: 8 unique vertices
-    Vertex verts[] = {
-        {{-0.5f, -0.5f, -0.5f}, {1, 0, 0, 1}},  // 0 front-BL
-        {{ 0.5f, -0.5f, -0.5f}, {0, 1, 0, 1}},  // 1 front-BR
-        {{ 0.5f,  0.5f, -0.5f}, {0, 0, 1, 1}},  // 2 front-TR
-        {{-0.5f,  0.5f, -0.5f}, {1, 1, 0, 1}},  // 3 front-TL
-        {{-0.5f, -0.5f,  0.5f}, {1, 0, 1, 1}},  // 4 back-BL
-        {{ 0.5f, -0.5f,  0.5f}, {0, 1, 1, 1}},  // 5 back-BR
-        {{ 0.5f,  0.5f,  0.5f}, {1, 1, 1, 1}},  // 6 back-TR
-        {{-0.5f,  0.5f,  0.5f}, {0, 0, 0, 1}},  // 7 back-TL
-    };
-
-    // 36 indices, CW winding, left-handed
-    UINT16 indices[] = {
-        0,3,2, 0,2,1,  // front  -z
-        4,5,6, 4,6,7,  // back   +z
-        0,4,7, 0,7,3,  // left   -x
-        1,2,6, 1,6,5,  // right  +x
-        3,7,6, 3,6,2,  // top    +y
-        0,1,5, 0,5,4,  // bottom -y
-    };
-
-    // Vertex buffer
     {
-        const UINT sz = sizeof(verts);
         auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-        auto bd = CD3DX12_RESOURCE_DESC::Buffer(sz);
-        g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_vertexBuffer));
-        UINT8* p; CD3DX12_RANGE r(0, 0);
-        g_vertexBuffer->Map(0, &r, (void**)&p);
-        memcpy(p, verts, sz);
-        g_vertexBuffer->Unmap(0, nullptr);
-        g_vbv = { g_vertexBuffer->GetGPUVirtualAddress(), sz, sizeof(Vertex) };
-    }
-
-    // Index buffer
-    {
-        const UINT sz = sizeof(indices);
-        auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-        auto bd = CD3DX12_RESOURCE_DESC::Buffer(sz);
-        g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_indexBuffer));
-        UINT8* p; CD3DX12_RANGE r(0, 0);
-        g_indexBuffer->Map(0, &r, (void**)&p);
-        memcpy(p, indices, sz);
-        g_indexBuffer->Unmap(0, nullptr);
-        g_ibv = { g_indexBuffer->GetGPUVirtualAddress(), sz, DXGI_FORMAT_R16_UINT };
-    }
-
-    // Constant buffer: kMaxCubes slots x 256 bytes, persistent mapped
-    {
-        const UINT sz = kMaxCubes * sizeof(SceneConstants);
-        auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-        auto bd = CD3DX12_RESOURCE_DESC::Buffer(sz);
+        auto bd = CD3DX12_RESOURCE_DESC::Buffer(sizeof(SceneConstants));
         g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_constantBuffer));
         CD3DX12_RANGE r(0, 0);
         g_constantBuffer->Map(0, &r, (void**)&g_cbMapped);
+    }
+
+    if (!g_mesh.Load("models/suzanne.obj", g_device.Get())) {
+        MessageBoxA(nullptr,
+            "Could not load models/suzanne.obj\n\n"
+            "Export Suzanne from Blender as .obj and place it in a 'models' folder next to lux.exe.",
+            "lux — missing model", MB_OK | MB_ICONERROR);
+        PostQuitMessage(1);
     }
 }
 
@@ -357,29 +298,20 @@ void Render(float t) {
     g_commandList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
     g_commandList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_commandList->IASetVertexBuffers(0, 1, &g_vbv);
-    g_commandList->IASetIndexBuffer(&g_ibv);
-
-    glm::mat4 view = g_camera.view();
-    glm::mat4 proj = glm::perspectiveLH_ZO(
+    glm::mat4 model = glm::rotate(glm::mat4(1.0f), t * 0.5f, glm::vec3(0, 1, 0));
+    glm::mat4 view  = g_camera.view();
+    glm::mat4 proj  = glm::perspectiveLH_ZO(
         glm::radians(60.0f),
         (float)g_windowWidth / (float)g_windowHeight,
         0.1f, 100.0f);
 
-    for (UINT i = 0; i < kCubeCount; ++i) {
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), g_cubes[i].pos);
-        model = glm::rotate(model, t * g_cubes[i].rotSpeed,
-            glm::normalize(g_cubes[i].axis));
+    SceneConstants sc;
+    sc.mvp = proj * view * model;
+    memcpy(g_cbMapped, &sc, sizeof(sc));
 
-        SceneConstants sc;
-        sc.mvp = proj * view * model;
-        memcpy(g_cbMapped + i * sizeof(SceneConstants), &sc, sizeof(sc));
-
-        g_commandList->SetGraphicsRootConstantBufferView(0,
-            g_constantBuffer->GetGPUVirtualAddress() + i * sizeof(SceneConstants));
-        g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
-    }
+    g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress());
+    g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_mesh.Draw(g_commandList.Get());
 
     auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         g_backBuffers[g_frameIndex].Get(),
@@ -432,7 +364,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int y = (int)(short)HIWORD(lParam);
             g_camera.yaw   += (x - g_lastMouseX) * 0.002f;
             g_camera.pitch -= (y - g_lastMouseY) * 0.002f;
-            constexpr float kMaxPitch = 1.5607f; // pi/2 - 0.01
+            constexpr float kMaxPitch = 1.5607f;
             if (g_camera.pitch >  kMaxPitch) g_camera.pitch =  kMaxPitch;
             if (g_camera.pitch < -kMaxPitch) g_camera.pitch = -kMaxPitch;
             RECT rc; GetClientRect(hwnd, &rc);

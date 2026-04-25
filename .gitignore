@@ -39,6 +39,7 @@ Thumbs.db
 .DS_Store
 
 # Assets too big to commit (manage separately)
+!models/*.obj
 assets/models/*.gltf
 assets/models/*.bin
 assets/textures/*.dds

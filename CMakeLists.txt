@@ -10,7 +10,12 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/g-truc/glm.git
     GIT_TAG 1.0.1
 )
-FetchContent_MakeAvailable(glm)
+FetchContent_Declare(
+    tinyobjloader
+    GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
+    GIT_TAG v2.0.0rc13
+)
+FetchContent_MakeAvailable(glm tinyobjloader)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.h)
 
@@ -23,11 +28,17 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dxgi
     d3dcompiler
     glm::glm
+    tinyobjloader
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/src PREFIX "src" FILES ${SOURCES})
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders.hlsl
-    $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders.hlsl)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders.hlsl
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders.hlsl
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>/models
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/models
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>/models)

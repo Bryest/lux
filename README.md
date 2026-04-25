@@ -32,13 +32,12 @@ Real-time DirectX 12 renderer written from scratch in C++. Built as a learning p
 ## Build
 
 ```bat
-cmake -S . -B out\build\x64-Release -DCMAKE_BUILD_TYPE=Release
-cmake --build out\build\x64-Release --config Release
+cmake -S . -B out -G "Visual Studio 17 2022" -A x64
+cmake --build out --config Debug
+out\Debug\lux.exe
 ```
 
-Or open the folder directly in Visual Studio 2022 — it picks up `CMakeLists.txt` automatically.
-
-GLM is fetched by CMake on first configure; no manual dependency install needed.
+GLM and tinyobjloader are fetched automatically by CMake on first configure.
 
 ---
 
@@ -73,7 +72,7 @@ out\build\x64-Release\lux.exe
 - [x] Constant buffer + per-object MVP
 - [x] Multiple spinning cubes
 - [x] Free camera (WASD + mouse look)
-- [ ] Load .obj 3D model
+- [x] Load .obj 3D model (Suzanne)
 - [ ] Texturing
 - [ ] Basic Phong lighting
 - [ ] Multiple lights + directional shadow maps
