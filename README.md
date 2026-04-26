@@ -1,6 +1,6 @@
 # lux
 
-![Phong lighting](media/phong-lighting.gif)
+![Diffuse texturing](media/diffuse-texturing.gif)
 
 Real-time DirectX 12 renderer written from scratch in C++. Built as a learning project and portfolio piece toward a graphics programmer role.
 
@@ -13,6 +13,7 @@ Real-time DirectX 12 renderer written from scratch in C++. Built as a learning p
 - Win32 window with full resize support
 - D3D12 device, double-buffered swap chain, depth buffer, and graphics PSO
 - .obj mesh loading via [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) — currently rendering Suzanne
+- Diffuse texture mapping via [stb_image](https://github.com/nothings/stb) — PNG/JPG loaded at runtime (test texture: [Rust Coarse 01](https://polyhaven.com/a/rust_coarse_01) from Poly Haven, CC0)
 - Phong lighting (ambient + diffuse + specular) with a directional light
 - HLSL vertex + pixel shaders compiled at runtime via `d3dcompiler`
 - Free-fly camera: WASD movement, right-click mouse look, scroll wheel speed
@@ -64,7 +65,7 @@ GLM and tinyobjloader are fetched automatically on first configure. `shaders.hls
 - [x] Multiple spinning cubes
 - [x] Free camera (WASD + mouse look)
 - [x] Load .obj 3D model (Suzanne)
-- [ ] Texturing
+- [x] Diffuse texture mapping (stb_image, SRV heap, runtime PNG/JPG loading)
 - [x] Phong lighting (ambient + diffuse + specular)
 - [ ] Multiple lights + directional shadow maps
 - [ ] Load .gltf model (Sponza)

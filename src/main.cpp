@@ -9,6 +9,7 @@
 #include <d3dcompiler.h>
 #include "d3dx12.h"
 #include "mesh.h"
+#include "texture.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -59,6 +60,7 @@ ComPtr<ID3D12Fence>               g_fence;
 ComPtr<ID3D12RootSignature>       g_rootSignature;
 ComPtr<ID3D12PipelineState>       g_pipelineState;
 ComPtr<ID3D12DescriptorHeap>      g_dsvHeap;
+ComPtr<ID3D12DescriptorHeap>      g_srvHeap;
 ComPtr<ID3D12Resource>            g_depthBuffer;
 ComPtr<ID3D12Resource>            g_constantBuffer;
 UINT8*                            g_cbMapped      = nullptr;
@@ -73,8 +75,9 @@ UINT    g_windowHeight      = kHeight;
 HWND    g_hwnd              = nullptr;
 
 // --- Scene state ---
-Camera g_camera;
-Mesh   g_mesh;
+Camera  g_camera;
+Mesh    g_mesh;
+Texture g_texture;
 float  g_moveSpeed  = 3.0f;
 bool   g_mouseLook  = false;
 int    g_lastMouseX = 0;
@@ -209,10 +212,27 @@ void InitD3D12(HWND hwnd) {
 }
 
 void InitScene() {
-    CD3DX12_ROOT_PARAMETER rp[1];
+    // Root param 0: CBV at b0 (constant buffer)
+    // Root param 1: descriptor table — 1 SRV at t0 (texture)
+    // Static sampler at s0
+    CD3DX12_DESCRIPTOR_RANGE srvRange;
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+    CD3DX12_ROOT_PARAMETER rp[2];
     rp[0].InitAsConstantBufferView(0);
+    rp[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.MaxLOD           = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister   = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     CD3DX12_ROOT_SIGNATURE_DESC rsd;
-    rsd.Init(1, rp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    rsd.Init(2, rp, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     ComPtr<ID3DBlob> rsBlob, rsErr;
     D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr);
     g_device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature));
@@ -256,6 +276,34 @@ void InitScene() {
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_constantBuffer));
         CD3DX12_RANGE r(0, 0);
         g_constantBuffer->Map(0, &r, (void**)&g_cbMapped);
+    }
+
+    // --- Texture upload (requires a command list execution) ---
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.NumDescriptors = 1;
+        hd.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        g_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g_srvHeap));
+
+        g_commandAllocator->Reset();
+        g_commandList->Reset(g_commandAllocator.Get(), nullptr);
+
+        if (!g_texture.LoadFile("textures/suzanne.png", g_device.Get(), g_commandList.Get()))
+            g_texture.CreateChecker(g_device.Get(), g_commandList.Get());
+
+        g_commandList->Close();
+        ID3D12CommandList* lists[] = { g_commandList.Get() };
+        g_commandQueue->ExecuteCommandLists(1, lists);
+        WaitForGPU();
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels     = 1;
+        g_device->CreateShaderResourceView(g_texture.resource.Get(), &sd,
+            g_srvHeap->GetCPUDescriptorHandleForHeapStart());
     }
 
     if (!g_mesh.Load("models/suzanne.obj", g_device.Get())) {
@@ -315,7 +363,10 @@ void Render(float t) {
     sc.cameraPos = glm::vec4(g_camera.pos, 0.0f);
     memcpy(g_cbMapped, &sc, sizeof(sc));
 
+    ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
+    g_commandList->SetDescriptorHeaps(1, heaps);
     g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress());
+    g_commandList->SetGraphicsRootDescriptorTable(1, g_srvHeap->GetGPUDescriptorHandleForHeapStart());
     g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_mesh.Draw(g_commandList.Get());
 

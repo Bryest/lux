@@ -15,13 +15,20 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
     GIT_TAG v2.0.0rc13
 )
-FetchContent_MakeAvailable(glm tinyobjloader)
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+)
+FetchContent_MakeAvailable(glm tinyobjloader stb)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.h)
 
 add_executable(${PROJECT_NAME} WIN32 ${SOURCES})
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE UNICODE _UNICODE)
+
+target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d12

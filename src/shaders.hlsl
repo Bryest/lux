@@ -6,6 +6,9 @@ cbuffer SceneConstants : register(b0)
     float4   cameraPos; // xyz = camera world position
 };
 
+Texture2D    g_texture : register(t0);
+SamplerState g_sampler : register(s0);
+
 struct VSIn
 {
     float3 position : POSITION;
@@ -39,7 +42,8 @@ float4 PSMain(PSIn input) : SV_TARGET
     float3 V = normalize(cameraPos.xyz - input.worldPos);
     float3 R = reflect(-L, N);
 
-    float3 baseColor = float3(0.85f, 0.55f, 0.35f); // warm clay
+    // Sample texture — falls back to checker pattern if no texture file was loaded
+    float3 baseColor = g_texture.Sample(g_sampler, input.uv).rgb;
 
     // Phong lighting model: ambient + diffuse + specular
     // ambient  — constant base light so shadows aren't pitch black
