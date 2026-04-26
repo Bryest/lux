@@ -23,8 +23,11 @@ constexpr UINT kWidth           = 1280;
 constexpr UINT kHeight          = 720;
 
 struct SceneConstants {
-    glm::mat4 mvp;
-    float _pad[48]; // pad to 256 bytes (D3D12 CB alignment requirement)
+    glm::mat4 mvp;        // 64
+    glm::mat4 model;      // 64
+    glm::vec4 lightDir;   // 16  xyz = dir toward light, w unused
+    glm::vec4 cameraPos;  // 16  xyz = camera world pos, w unused
+    float     _pad[24];   // 96  pad to 256
 };
 static_assert(sizeof(SceneConstants) == 256);
 
@@ -305,8 +308,11 @@ void Render(float t) {
         (float)g_windowWidth / (float)g_windowHeight,
         0.1f, 100.0f);
 
-    SceneConstants sc;
-    sc.mvp = proj * view * model;
+    SceneConstants sc = {};
+    sc.mvp       = proj * view * model;
+    sc.model     = model;
+    sc.lightDir  = glm::vec4(glm::normalize(glm::vec3(1.0f, 2.0f, -1.0f)), 0.0f);
+    sc.cameraPos = glm::vec4(g_camera.pos, 0.0f);
     memcpy(g_cbMapped, &sc, sizeof(sc));
 
     g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress());

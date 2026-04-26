@@ -1,6 +1,6 @@
 # lux
 
-![Suzanne](media/suzanne.gif)
+![Suzanne](media/phong-lighting.gif)
 
 Real-time DirectX 12 renderer written from scratch in C++. Built as a learning project and portfolio piece toward a graphics programmer role.
 
