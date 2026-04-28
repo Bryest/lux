@@ -8,6 +8,7 @@ struct Vertex {
     float position[3];
     float normal[3];
     float uv[2];
+    float tangent[4]; // xyz = tangent direction, w = bitangent sign (±1)
 };
 
 struct Mesh {

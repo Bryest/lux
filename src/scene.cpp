@@ -71,7 +71,7 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
         cgltf_free(data); return false;
     }
 
-    // Slot 0: grey/white checker used as fallback for missing textures
+    // Slot 0: grey/white checker — albedo fallback
     {
         constexpr UINT N = 16;
         uint32_t checker[N * N];
@@ -83,21 +83,35 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
         MakeSrv(device, tex.Get(), srvHeap, 0, srvDescSize);
         textures.push_back(std::move(tex));
         uploads.push_back(std::move(up));
-        textureCount = 1;
     }
+
+    // Slot 1: flat normal map (128,128,255) = tangent-space (0,0,1) — normal fallback
+    {
+        constexpr UINT N = 4;
+        uint32_t flat[N * N];
+        for (UINT i = 0; i < N*N; ++i)
+            flat[i] = 0xFFFF8080; // R=128 G=128 B=255 A=255
+        ComPtr<ID3D12Resource> tex, up;
+        UploadTex(device, cmdList, tex, up, N, N, flat);
+        MakeSrv(device, tex.Get(), srvHeap, 1, srvDescSize);
+        textures.push_back(std::move(tex));
+        uploads.push_back(std::move(up));
+    }
+
+    textureCount = 2; // slots 0 and 1 reserved for fallbacks
 
     std::string dir = DirOf(path);
     std::unordered_map<cgltf_image*, UINT> texCache;
 
-    auto loadTex = [&](cgltf_image* img) -> UINT {
-        if (!img || !img->uri) return 0;
+    auto loadTex = [&](cgltf_image* img, UINT fallback) -> UINT {
+        if (!img || !img->uri) return fallback;
         auto it = texCache.find(img);
         if (it != texCache.end()) return it->second;
 
         std::string fullPath = dir + img->uri;
         int w, h, ch;
         stbi_uc* pixels = stbi_load(fullPath.c_str(), &w, &h, &ch, 4);
-        if (!pixels) { texCache[img] = 0; return 0; }
+        if (!pixels) { texCache[img] = fallback; return fallback; }
 
         ComPtr<ID3D12Resource> tex, up;
         UploadTex(device, cmdList, tex, up, (UINT)w, (UINT)h, pixels);
@@ -125,12 +139,14 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
                 cgltf_primitive& prim = node->mesh->primitives[pi];
                 if (prim.type != cgltf_primitive_type_triangles || !prim.indices) continue;
 
-                cgltf_accessor* posAcc = nullptr, *nrmAcc = nullptr, *uvAcc = nullptr;
+                cgltf_accessor* posAcc = nullptr, *nrmAcc = nullptr,
+                              * uvAcc  = nullptr, *tanAcc  = nullptr;
                 for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
                     auto& a = prim.attributes[ai];
-                    if      (a.type == cgltf_attribute_type_position)                    posAcc = a.data;
-                    else if (a.type == cgltf_attribute_type_normal)                      nrmAcc = a.data;
-                    else if (a.type == cgltf_attribute_type_texcoord && a.index == 0)    uvAcc  = a.data;
+                    if      (a.type == cgltf_attribute_type_position)                 posAcc = a.data;
+                    else if (a.type == cgltf_attribute_type_normal)                   nrmAcc = a.data;
+                    else if (a.type == cgltf_attribute_type_texcoord && a.index == 0) uvAcc  = a.data;
+                    else if (a.type == cgltf_attribute_type_tangent)                  tanAcc = a.data;
                 }
                 if (!posAcc) continue;
 
@@ -141,7 +157,8 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
 
                 for (UINT i = 0; i < vertCount; ++i) {
                     Vertex v = {};
-                    float p[3] = {}, n[3] = {0,1,0}, uv[2] = {};
+                    float p[3] = {}, n[3] = {0,1,0}, uv[2] = {}, t[4] = {1,0,0,1};
+
                     cgltf_accessor_read_float(posAcc, i, p, 3);
                     glm::vec4 wp = world * glm::vec4(p[0], p[1], p[2], 1.0f);
                     v.position[0] =  wp.x;
@@ -158,7 +175,15 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
                     if (uvAcc) {
                         cgltf_accessor_read_float(uvAcc, i, uv, 2);
                         v.uv[0] = uv[0];
-                        v.uv[1] = uv[1]; // glTF UV (0,0)=top-left matches D3D12 — no flip
+                        v.uv[1] = uv[1];
+                    }
+                    if (tanAcc) {
+                        cgltf_accessor_read_float(tanAcc, i, t, 4);
+                        glm::vec3 wt = glm::normalize(normMat * glm::vec3(t[0], t[1], t[2]));
+                        v.tangent[0] =  wt.x;
+                        v.tangent[1] =  wt.y;
+                        v.tangent[2] = -wt.z;
+                        v.tangent[3] =  t[3]; // handedness ±1 preserved
                     }
                     verts.push_back(v);
                 }
@@ -166,13 +191,18 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
                 for (UINT i = 0; i < idxCount; ++i)
                     inds.push_back((UINT32)cgltf_accessor_read_index(prim.indices, i));
 
-                UINT texIdx = 0;
-                if (prim.material && prim.material->has_pbr_metallic_roughness) {
-                    auto& tv = prim.material->pbr_metallic_roughness.base_color_texture;
-                    if (tv.texture && tv.texture->image)
-                        texIdx = loadTex(tv.texture->image);
+                UINT albedoIdx = 0, normalIdx = 1;
+                if (prim.material) {
+                    if (prim.material->has_pbr_metallic_roughness) {
+                        auto& tv = prim.material->pbr_metallic_roughness.base_color_texture;
+                        if (tv.texture && tv.texture->image)
+                            albedoIdx = loadTex(tv.texture->image, 0);
+                    }
+                    auto& nv = prim.material->normal_texture;
+                    if (nv.texture && nv.texture->image)
+                        normalIdx = loadTex(nv.texture->image, 1);
                 }
-                drawCalls.push_back({ idxCount, startIndex, (INT)baseVertex, texIdx });
+                drawCalls.push_back({ idxCount, startIndex, (INT)baseVertex, albedoIdx, normalIdx });
             }
         }
         for (cgltf_size i = 0; i < node->children_count; ++i)
@@ -188,7 +218,6 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
 
     cgltf_free(data);
 
-    // Upload VB + IB to DEFAULT heap for best GPU read performance
     auto uploadBuf = [&](ComPtr<ID3D12Resource>& res, ComPtr<ID3D12Resource>& up,
                          const void* srcData, UINT64 size, D3D12_RESOURCE_STATES finalState) {
         auto  hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
@@ -233,9 +262,11 @@ void Scene::Draw(ID3D12GraphicsCommandList* cmdList,
     cmdList->IASetVertexBuffers(0, 1, &vbv);
     cmdList->IASetIndexBuffer(&ibv);
     for (const DrawCall& dc : drawCalls) {
-        CD3DX12_GPU_DESCRIPTOR_HANDLE srv(srvHeap->GetGPUDescriptorHandleForHeapStart());
-        srv.Offset(dc.textureIdx, srvDescSize);
-        cmdList->SetGraphicsRootDescriptorTable(1, srv);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE base(srvHeap->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE albedo = base; albedo.Offset(dc.albedoIdx, srvDescSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE normal = base; normal.Offset(dc.normalIdx, srvDescSize);
+        cmdList->SetGraphicsRootDescriptorTable(1, albedo);
+        cmdList->SetGraphicsRootDescriptorTable(2, normal);
         cmdList->DrawIndexedInstanced(dc.indexCount, 1, dc.startIndex, dc.baseVertex, 0);
     }
 }

@@ -9,7 +9,8 @@ struct DrawCall {
     UINT indexCount;
     UINT startIndex;
     INT  baseVertex;
-    UINT textureIdx;
+    UINT albedoIdx;
+    UINT normalIdx;
 };
 
 struct Scene {
