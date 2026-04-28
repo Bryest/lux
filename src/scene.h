@@ -30,4 +30,6 @@ struct Scene {
 
     void Draw(ID3D12GraphicsCommandList* cmdList,
               ID3D12DescriptorHeap* srvHeap, UINT srvDescSize) const;
+
+    void DrawDepth(ID3D12GraphicsCommandList* cmdList) const;
 };

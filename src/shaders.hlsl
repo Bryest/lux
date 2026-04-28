@@ -2,6 +2,7 @@ cbuffer SceneConstants : register(b0)
 {
     float4x4 mvp;
     float4x4 model;
+    float4x4 lightVP;    // light view-projection for shadow mapping
     float4   lightDir;   // xyz = direction toward light (world space)
     float4   cameraPos;  // xyz = camera world position
     float4   lightColor; // xyz = color * intensity
@@ -10,7 +11,9 @@ cbuffer SceneConstants : register(b0)
 Texture2D    g_albedo           : register(t0);
 Texture2D    g_normal           : register(t1);
 Texture2D    g_metallicRoughness: register(t2); // G=roughness, B=metallic
-SamplerState g_sampler          : register(s0);
+Texture2D    g_shadowMap        : register(t3);
+SamplerState g_sampler          : register(s0); // linear wrap
+SamplerState g_shadowSampler    : register(s1); // point clamp
 
 static const float PI = 3.14159265f;
 
@@ -70,6 +73,26 @@ float3 F_Schlick(float HdotV, float3 F0)
     return F0 + (1.0f - F0) * pow(saturate(1.0f - HdotV), 5.0f);
 }
 
+// PCF shadow — 3x3 kernel, returns 1=lit 0=shadow
+float ShadowFactor(float3 worldPos)
+{
+    float4 lsPos = mul(lightVP, float4(worldPos, 1.0f));
+    float3 proj  = lsPos.xyz / lsPos.w;
+
+    // Outside shadow frustum → fully lit
+    if (any(abs(proj.xy) > 1.0f) || proj.z < 0.0f || proj.z > 1.0f) return 1.0f;
+
+    float2 uv = float2(proj.x * 0.5f + 0.5f, -proj.y * 0.5f + 0.5f);
+    float  depth = proj.z - 0.002f; // bias to prevent shadow acne
+
+    float shadow = 0.0f;
+    float texel  = 1.0f / 4096.0f;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+        shadow += (depth > g_shadowMap.SampleLevel(g_shadowSampler, uv + float2(x,y)*texel, 0).r) ? 0.0f : 1.0f;
+    return shadow / 9.0f;
+}
+
 // ACES filmic tone mapping — compresses HDR range to [0,1]
 float3 ACESFilm(float3 x)
 {
@@ -114,9 +137,10 @@ float4 PSMain(PSIn input) : SV_TARGET
     float3 kD       = (1.0f - F) * (1.0f - metallic); // metals absorb all diffuse
     float3 diffuse  = kD * albedo / PI;
 
-    float3 color = (diffuse + specular) * lightColor.xyz * NdotL;
+    float  shadow = ShadowFactor(input.worldPos);
+    float3 color  = (diffuse + specular) * lightColor.xyz * NdotL * shadow;
 
-    // Ambient — simple constant (IBL would replace this in Phase 7 later)
+    // Ambient is not shadowed
     color += albedo * 0.03f;
 
     // --- Tone mapping + gamma correction ---

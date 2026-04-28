@@ -9,6 +9,9 @@
 #include <d3dcompiler.h>
 #include "d3dx12.h"
 #include "scene.h"
+#include <imgui.h>
+#include <imgui_impl_win32.h>
+#include <imgui_impl_dx12.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -21,14 +24,17 @@ using Microsoft::WRL::ComPtr;
 constexpr UINT kBackBufferCount = 2;
 constexpr UINT kWidth           = 1280;
 constexpr UINT kHeight          = 720;
+constexpr UINT kShadowMapSize   = 4096;
+constexpr UINT kShadowSrvSlot   = 255; // fixed slot in g_srvHeap
 
 struct SceneConstants {
     glm::mat4 mvp;        // 64
     glm::mat4 model;      // 64
+    glm::mat4 lightVP;    // 64  light view-projection for shadow mapping
     glm::vec4 lightDir;   // 16  xyz = dir toward light
     glm::vec4 cameraPos;  // 16  xyz = camera world pos
     glm::vec4 lightColor; // 16  xyz = color * intensity
-    float     _pad[20];   // 80  pad to 256
+    float     _pad[4];    // 16  pad to 256
 };
 static_assert(sizeof(SceneConstants) == 256);
 
@@ -74,11 +80,23 @@ UINT    g_windowWidth       = kWidth;
 UINT    g_windowHeight      = kHeight;
 HWND    g_hwnd              = nullptr;
 
+// --- Shadow state ---
+ComPtr<ID3D12Resource>       g_shadowMap;
+ComPtr<ID3D12DescriptorHeap> g_shadowDsvHeap;
+ComPtr<ID3D12RootSignature>  g_shadowRootSignature;
+ComPtr<ID3D12PipelineState>  g_shadowPipelineState;
+ComPtr<ID3D12Resource>       g_shadowConstantBuffer;
+UINT8*                       g_shadowCbMapped = nullptr;
+
 // --- Scene state ---
-Camera  g_camera;
-Scene   g_scene;
-UINT    g_srvDescSize = 0;
-float  g_moveSpeed  = 10.0f;
+Camera    g_camera;
+Scene     g_scene;
+UINT      g_srvDescSize = 0;
+float     g_moveSpeed   = 10.0f;
+glm::vec3 g_lightDir    = glm::vec3(0.0f, 2.0f, -0.45f); // editable via ImGui
+
+// --- ImGui ---
+ComPtr<ID3D12DescriptorHeap> g_imguiSrvHeap;
 bool   g_mouseLook  = false;
 int    g_lastMouseX = 0;
 int    g_lastMouseY = 0;
@@ -211,32 +229,121 @@ void InitD3D12(HWND hwnd) {
     g_scissor.bottom    = kHeight;
 }
 
+void InitShadows() {
+    // Shadow map (R32_TYPELESS so it can be both DSV and SRV)
+    D3D12_RESOURCE_DESC sd = {};
+    sd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    sd.Width            = kShadowMapSize;
+    sd.Height           = kShadowMapSize;
+    sd.DepthOrArraySize = 1;
+    sd.MipLevels        = 1;
+    sd.Format           = DXGI_FORMAT_R32_TYPELESS;
+    sd.SampleDesc.Count = 1;
+    sd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE cv = {};
+    cv.Format = DXGI_FORMAT_D32_FLOAT;
+    cv.DepthStencil.Depth = 1.0f;
+
+    auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &sd,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&g_shadowMap));
+
+    // DSV
+    D3D12_DESCRIPTOR_HEAP_DESC dhd = {};
+    dhd.NumDescriptors = 1;
+    dhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    g_device->CreateDescriptorHeap(&dhd, IID_PPV_ARGS(&g_shadowDsvHeap));
+
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format        = DXGI_FORMAT_D32_FLOAT;
+    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    g_device->CreateDepthStencilView(g_shadowMap.Get(), &dsvDesc,
+        g_shadowDsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    // Shadow constant buffer (just holds lightVP mat4, padded to 256)
+    auto chp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    auto cbd = CD3DX12_RESOURCE_DESC::Buffer(256);
+    g_device->CreateCommittedResource(&chp, D3D12_HEAP_FLAG_NONE, &cbd,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_shadowConstantBuffer));
+    CD3DX12_RANGE r(0, 0);
+    g_shadowConstantBuffer->Map(0, &r, (void**)&g_shadowCbMapped);
+
+    // Shadow root signature: just CBV at b0
+    CD3DX12_ROOT_PARAMETER srp[1];
+    srp[0].InitAsConstantBufferView(0);
+    CD3DX12_ROOT_SIGNATURE_DESC srsd;
+    srsd.Init(1, srp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    ComPtr<ID3DBlob> srsBlob, srsErr;
+    D3D12SerializeRootSignature(&srsd, D3D_ROOT_SIGNATURE_VERSION_1, &srsBlob, &srsErr);
+    g_device->CreateRootSignature(0, srsBlob->GetBufferPointer(), srsBlob->GetBufferSize(),
+        IID_PPV_ARGS(&g_shadowRootSignature));
+
+    // Shadow PSO (depth-only, no pixel shader)
+    ComPtr<ID3DBlob> shadowVs, errBlob;
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    D3DCompileFromFile(L"shadow.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", flags, 0, &shadowVs, &errBlob);
+
+    D3D12_INPUT_ELEMENT_DESC shadowLayout[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC spd = {};
+    spd.InputLayout           = { shadowLayout, 1 };
+    spd.pRootSignature        = g_shadowRootSignature.Get();
+    spd.VS                    = CD3DX12_SHADER_BYTECODE(shadowVs.Get());
+    auto srs                  = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    srs.FrontCounterClockwise = TRUE;
+    srs.DepthBias             = 5000;
+    srs.SlopeScaledDepthBias  = 2.0f;
+    spd.RasterizerState       = srs;
+    spd.BlendState            = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    spd.DepthStencilState     = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    spd.SampleMask            = UINT_MAX;
+    spd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    spd.NumRenderTargets      = 0;
+    spd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+    spd.SampleDesc.Count      = 1;
+    g_device->CreateGraphicsPipelineState(&spd, IID_PPV_ARGS(&g_shadowPipelineState));
+}
+
 void InitScene() {
-    // Root param 0: CBV at b0 (constant buffer)
-    // Root param 1: descriptor table — 1 SRV at t0 (texture)
-    // Static sampler at s0
-    CD3DX12_DESCRIPTOR_RANGE srvRange0, srvRange1, srvRange2;
+    CD3DX12_DESCRIPTOR_RANGE srvRange0, srvRange1, srvRange2, srvRange3;
     srvRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0 = albedo
     srvRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // t1 = normal map
     srvRange2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2); // t2 = metallic-roughness
+    srvRange3.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3); // t3 = shadow map
 
-    CD3DX12_ROOT_PARAMETER rp[4];
+    CD3DX12_ROOT_PARAMETER rp[5];
     rp[0].InitAsConstantBufferView(0);
     rp[1].InitAsDescriptorTable(1, &srvRange0, D3D12_SHADER_VISIBILITY_PIXEL);
     rp[2].InitAsDescriptorTable(1, &srvRange1, D3D12_SHADER_VISIBILITY_PIXEL);
     rp[3].InitAsDescriptorTable(1, &srvRange2, D3D12_SHADER_VISIBILITY_PIXEL);
+    rp[4].InitAsDescriptorTable(1, &srvRange3, D3D12_SHADER_VISIBILITY_PIXEL);
 
-    D3D12_STATIC_SAMPLER_DESC sampler = {};
-    sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.MaxLOD           = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister   = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
+    // s0: linear wrap — textures
+    samplers[0].Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samplers[0].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[0].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[0].AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[0].MaxLOD           = D3D12_FLOAT32_MAX;
+    samplers[0].ShaderRegister   = 0;
+    samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    // s1: point clamp — shadow map
+    samplers[1].Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    samplers[1].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[1].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[1].AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[1].MaxLOD           = D3D12_FLOAT32_MAX;
+    samplers[1].ShaderRegister   = 1;
+    samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC rsd;
-    rsd.Init(4, rp, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    rsd.Init(5, rp, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     ComPtr<ID3DBlob> rsBlob, rsErr;
     D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr);
     g_device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature));
@@ -283,7 +390,7 @@ void InitScene() {
         g_constantBuffer->Map(0, &r, (void**)&g_cbMapped);
     }
 
-    // --- SRV heap: 256 slots for all Sponza textures ---
+    // --- SRV heap: 256 slots (0-254 = scene textures, 255 = shadow map) ---
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.NumDescriptors = 256;
@@ -291,6 +398,20 @@ void InitScene() {
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         g_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g_srvHeap));
         g_srvDescSize = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+
+    InitShadows();
+
+    // Shadow map SRV at slot 255
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format                  = DXGI_FORMAT_R32_FLOAT;
+        sd.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels     = 1;
+        CD3DX12_CPU_DESCRIPTOR_HANDLE h(g_srvHeap->GetCPUDescriptorHandleForHeapStart());
+        h.Offset(kShadowSrvSlot, g_srvDescSize);
+        g_device->CreateShaderResourceView(g_shadowMap.Get(), &sd, h);
     }
 
     g_commandAllocator->Reset();
@@ -327,10 +448,46 @@ void Update(float dt) {
 }
 
 void Render(float t) {
-    g_commandAllocator->Reset();
-    g_commandList->Reset(g_commandAllocator.Get(), g_pipelineState.Get());
+    glm::vec3 lightDirV = glm::normalize(g_lightDir);
+    glm::vec3 lightPos  = lightDirV * 40.0f;
+    glm::mat4 lightView = glm::lookAtLH(lightPos, glm::vec3(0.0f, 5.0f, 0.0f), glm::vec3(0, 1, 0));
+    glm::mat4 lightProj = glm::orthoLH_ZO(-22.0f, 22.0f, -12.0f, 12.0f, 0.1f, 80.0f);
+    glm::mat4 lightVP   = lightProj * lightView;
 
+    g_commandAllocator->Reset();
+    g_commandList->Reset(g_commandAllocator.Get(), nullptr);
+
+    // ===================== SHADOW PASS =====================
+    auto toDepthWrite = CD3DX12_RESOURCE_BARRIER::Transition(
+        g_shadowMap.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    g_commandList->ResourceBarrier(1, &toDepthWrite);
+
+    auto shadowDsv = g_shadowDsvHeap->GetCPUDescriptorHandleForHeapStart();
+    g_commandList->ClearDepthStencilView(shadowDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    g_commandList->OMSetRenderTargets(0, nullptr, FALSE, &shadowDsv);
+
+    D3D12_VIEWPORT shadowVP = { 0, 0, (float)kShadowMapSize, (float)kShadowMapSize, 0, 1 };
+    D3D12_RECT     shadowSc = { 0, 0, (LONG)kShadowMapSize, (LONG)kShadowMapSize };
+    g_commandList->RSSetViewports(1, &shadowVP);
+    g_commandList->RSSetScissorRects(1, &shadowSc);
+
+    memcpy(g_shadowCbMapped, &lightVP, sizeof(glm::mat4));
+
+    g_commandList->SetGraphicsRootSignature(g_shadowRootSignature.Get());
+    g_commandList->SetPipelineState(g_shadowPipelineState.Get());
+    g_commandList->SetGraphicsRootConstantBufferView(0, g_shadowConstantBuffer->GetGPUVirtualAddress());
+    g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_scene.DrawDepth(g_commandList.Get());
+
+    auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(
+        g_shadowMap.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    g_commandList->ResourceBarrier(1, &toSrv);
+
+    // ===================== MAIN PASS =====================
     g_commandList->SetGraphicsRootSignature(g_rootSignature.Get());
+    g_commandList->SetPipelineState(g_pipelineState.Get());
     g_commandList->RSSetViewports(1, &g_viewport);
     g_commandList->RSSetScissorRects(1, &g_scissor);
 
@@ -358,7 +515,8 @@ void Render(float t) {
     SceneConstants sc = {};
     sc.mvp       = proj * view * model;
     sc.model     = model;
-    sc.lightDir   = glm::vec4(glm::normalize(glm::vec3(1.0f, 2.0f, -1.0f)), 0.0f);
+    sc.lightVP    = lightVP;
+    sc.lightDir   = glm::vec4(lightDirV, 0.0f);
     sc.cameraPos  = glm::vec4(g_camera.pos, 0.0f);
     sc.lightColor = glm::vec4(3.0f, 2.8f, 2.5f, 0.0f); // warm sunlight
     memcpy(g_cbMapped, &sc, sizeof(sc));
@@ -366,8 +524,33 @@ void Render(float t) {
     ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
     g_commandList->SetDescriptorHeaps(1, heaps);
     g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress());
+    // Bind shadow map SRV at root param 4 (t3) — same for all draw calls
+    CD3DX12_GPU_DESCRIPTOR_HANDLE shadowSrv(g_srvHeap->GetGPUDescriptorHandleForHeapStart());
+    shadowSrv.Offset(kShadowSrvSlot, g_srvDescSize);
+    g_commandList->SetGraphicsRootDescriptorTable(4, shadowSrv);
+
     g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_scene.Draw(g_commandList.Get(), g_srvHeap.Get(), g_srvDescSize);
+
+    // === IMGUI PASS ===
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    ImGui::Begin("lux");
+    ImGui::Text("%.1f FPS", ImGui::GetIO().Framerate);
+    ImGui::Text("cam: %.1f %.1f %.1f", g_camera.pos.x, g_camera.pos.y, g_camera.pos.z);
+    ImGui::Separator();
+    ImGui::Text("Sun Direction");
+    ImGui::SliderFloat("X##sun", &g_lightDir.x, -2.0f, 2.0f);
+    ImGui::SliderFloat("Y##sun", &g_lightDir.y, 0.0f,  2.0f);
+    ImGui::SliderFloat("Z##sun", &g_lightDir.z, -2.0f, 2.0f);
+    ImGui::End();
+
+    ImGui::Render();
+    ID3D12DescriptorHeap* imguiHeaps[] = { g_imguiSrvHeap.Get() };
+    g_commandList->SetDescriptorHeaps(1, imguiHeaps);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_commandList.Get());
 
     auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         g_backBuffers[g_frameIndex].Get(),
@@ -382,7 +565,30 @@ void Render(float t) {
     g_frameIndex = g_swapChain->GetCurrentBackBufferIndex();
 }
 
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
+void InitImGui(HWND hwnd) {
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.NumDescriptors = 1;
+    hd.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    g_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g_imguiSrvHeap));
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui::GetIO().IniFilename = nullptr; // don't save imgui.ini
+
+    ImGui_ImplWin32_Init(hwnd);
+    ImGui_ImplDX12_Init(g_device.Get(), kBackBufferCount,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        g_imguiSrvHeap.Get(),
+        g_imguiSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        g_imguiSrvHeap->GetGPUDescriptorHandleForHeapStart());
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam)) return true;
     switch (msg) {
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -457,6 +663,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     InitD3D12(g_hwnd);
     InitScene();
+    InitImGui(g_hwnd);
 
     auto startTime = std::chrono::high_resolution_clock::now();
     auto prevTime  = startTime;
@@ -477,6 +684,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     }
 
     WaitForGPU();
+    ImGui_ImplDX12_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
     CloseHandle(g_fenceEvent);
     return 0;
 }

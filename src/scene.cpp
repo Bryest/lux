@@ -273,6 +273,14 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
     return true;
 }
 
+void Scene::DrawDepth(ID3D12GraphicsCommandList* cmdList) const
+{
+    cmdList->IASetVertexBuffers(0, 1, &vbv);
+    cmdList->IASetIndexBuffer(&ibv);
+    for (const DrawCall& dc : drawCalls)
+        cmdList->DrawIndexedInstanced(dc.indexCount, 1, dc.startIndex, dc.baseVertex, 0);
+}
+
 void Scene::Draw(ID3D12GraphicsCommandList* cmdList,
                  ID3D12DescriptorHeap* srvHeap, UINT srvDescSize) const
 {

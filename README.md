@@ -1,6 +1,6 @@
 # lux
 
-![Sponza PBR](media/sponza-pbr.png)
+![Sponza with shadows](media/sponza-shadows.png)
 
 Real-time DirectX 12 renderer written from scratch in C++. Built as a learning project and portfolio piece toward a graphics programmer role.
 
@@ -13,6 +13,8 @@ Real-time DirectX 12 renderer written from scratch in C++. Built as a learning p
 - Win32 window with full resize support
 - D3D12 device, double-buffered swap chain, depth buffer, and graphics PSO
 - glTF 2.0 scene loading via [cgltf](https://github.com/jkuhlmann/cgltf) — rendering the Khronos Sponza scene (~69 textures, hundreds of draw calls)
+- **Shadow mapping** — 4096×4096 depth map, PCF 3×3 soft shadows, slope-scaled depth bias
+- **ImGui debug panel** — live light direction sliders, FPS counter, camera position
 - **PBR shading** — Cook-Torrance BRDF (GGX distribution, Smith geometry, Schlick Fresnel)
 - Metallic-roughness workflow: per-material albedo, normal map, and metallic-roughness textures
 - ACES filmic tone mapping + gamma correction (linear → sRGB)
@@ -74,7 +76,8 @@ GLM, tinyobjloader, and cgltf are fetched automatically on first configure. `sha
 - [x] Load .gltf model (Sponza) — cgltf, per-material textures, full scene traversal
 - [x] Normal mapping — TBN matrix, tangent-space normal maps per material
 - [x] PBR — Cook-Torrance BRDF, metallic-roughness textures, ACES tone mapping
-- [ ] Shadow maps (directional + PCF)
+- [x] Shadow maps — directional light, PCF 3×3 soft shadows, depth bias
+- [x] ImGui debug panel — live light direction control, FPS, camera position
 - [ ] Flagship feature (DXR / Radiance Cascades)
 - [ ] Post-processing (SSAO, bloom), skybox
 - [ ] Public showcase with screenshots + recording
