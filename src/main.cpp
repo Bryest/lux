@@ -8,8 +8,7 @@
 #include <wrl.h>
 #include <d3dcompiler.h>
 #include "d3dx12.h"
-#include "mesh.h"
-#include "texture.h"
+#include "scene.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -33,7 +32,7 @@ struct SceneConstants {
 static_assert(sizeof(SceneConstants) == 256);
 
 struct Camera {
-    glm::vec3 pos   = { 0.0f, 1.0f, -4.0f };
+    glm::vec3 pos   = { 0.0f, 2.0f,  0.0f };
     float     yaw   = 0.0f;
     float     pitch = -0.1f;
 
@@ -76,9 +75,9 @@ HWND    g_hwnd              = nullptr;
 
 // --- Scene state ---
 Camera  g_camera;
-Mesh    g_mesh;
-Texture g_texture;
-float  g_moveSpeed  = 3.0f;
+Scene   g_scene;
+UINT    g_srvDescSize = 0;
+float  g_moveSpeed  = 10.0f;
 bool   g_mouseLook  = false;
 int    g_lastMouseX = 0;
 int    g_lastMouseY = 0;
@@ -278,39 +277,33 @@ void InitScene() {
         g_constantBuffer->Map(0, &r, (void**)&g_cbMapped);
     }
 
-    // --- Texture upload (requires a command list execution) ---
+    // --- SRV heap: 256 slots for all Sponza textures ---
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
-        hd.NumDescriptors = 1;
+        hd.NumDescriptors = 256;
         hd.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         g_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g_srvHeap));
-
-        g_commandAllocator->Reset();
-        g_commandList->Reset(g_commandAllocator.Get(), nullptr);
-
-        if (!g_texture.LoadFile("textures/suzanne.png", g_device.Get(), g_commandList.Get()))
-            g_texture.CreateChecker(g_device.Get(), g_commandList.Get());
-
-        g_commandList->Close();
-        ID3D12CommandList* lists[] = { g_commandList.Get() };
-        g_commandQueue->ExecuteCommandLists(1, lists);
-        WaitForGPU();
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
-        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sd.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
-        sd.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
-        sd.Texture2D.MipLevels     = 1;
-        g_device->CreateShaderResourceView(g_texture.resource.Get(), &sd,
-            g_srvHeap->GetCPUDescriptorHandleForHeapStart());
+        g_srvDescSize = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
 
-    if (!g_mesh.Load("models/suzanne.obj", g_device.Get())) {
+    g_commandAllocator->Reset();
+    g_commandList->Reset(g_commandAllocator.Get(), nullptr);
+
+    bool sceneOk = g_scene.LoadGltf("models/sponza/glTF/Sponza.gltf",
+                                     g_device.Get(), g_commandList.Get(),
+                                     g_srvHeap.Get(), g_srvDescSize);
+
+    g_commandList->Close();
+    ID3D12CommandList* lists[] = { g_commandList.Get() };
+    g_commandQueue->ExecuteCommandLists(1, lists);
+    WaitForGPU();
+
+    if (!sceneOk) {
         MessageBoxA(nullptr,
-            "Could not load models/suzanne.obj\n\n"
-            "Export Suzanne from Blender as .obj and place it in a 'models' folder next to lux.exe.",
-            "lux — missing model", MB_OK | MB_ICONERROR);
+            "Could not load models/sponza/glTF/Sponza.gltf\n\n"
+            "Make sure the Sponza assets are in a 'models/sponza/glTF' folder next to lux.exe.",
+            "lux — missing scene", MB_OK | MB_ICONERROR);
         PostQuitMessage(1);
     }
 }
@@ -349,12 +342,12 @@ void Render(float t) {
     g_commandList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
     g_commandList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    glm::mat4 model = glm::rotate(glm::mat4(1.0f), t * 0.5f, glm::vec3(0, 1, 0));
+    glm::mat4 model = glm::mat4(1.0f);
     glm::mat4 view  = g_camera.view();
     glm::mat4 proj  = glm::perspectiveLH_ZO(
         glm::radians(60.0f),
         (float)g_windowWidth / (float)g_windowHeight,
-        0.1f, 100.0f);
+        0.1f, 500.0f);
 
     SceneConstants sc = {};
     sc.mvp       = proj * view * model;
@@ -366,9 +359,8 @@ void Render(float t) {
     ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
     g_commandList->SetDescriptorHeaps(1, heaps);
     g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress());
-    g_commandList->SetGraphicsRootDescriptorTable(1, g_srvHeap->GetGPUDescriptorHandleForHeapStart());
     g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_mesh.Draw(g_commandList.Get());
+    g_scene.Draw(g_commandList.Get(), g_srvHeap.Get(), g_srvDescSize);
 
     auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         g_backBuffers[g_frameIndex].Get(),

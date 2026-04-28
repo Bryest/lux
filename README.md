@@ -1,6 +1,6 @@
 # lux
 
-![Diffuse texturing](media/diffuse-texturing.gif)
+![Sponza](media/sponza.png)
 
 Real-time DirectX 12 renderer written from scratch in C++. Built as a learning project and portfolio piece toward a graphics programmer role.
 
@@ -12,13 +12,14 @@ Real-time DirectX 12 renderer written from scratch in C++. Built as a learning p
 
 - Win32 window with full resize support
 - D3D12 device, double-buffered swap chain, depth buffer, and graphics PSO
-- .obj mesh loading via [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) — currently rendering Suzanne
-- Diffuse texture mapping via [stb_image](https://github.com/nothings/stb) — PNG/JPG loaded at runtime (test texture: [Rust Coarse 01](https://polyhaven.com/a/rust_coarse_01) from Poly Haven, CC0)
+- glTF 2.0 scene loading via [cgltf](https://github.com/jkuhlmann/cgltf) — rendering the Khronos Sponza scene (~69 textures, hundreds of draw calls)
+- Per-material diffuse textures: SRV descriptor heap, one texture bind per draw call
+- Diffuse texture loading via [stb_image](https://github.com/nothings/stb) — PNG/JPG loaded at runtime
 - Phong lighting (ambient + diffuse + specular) with a directional light
 - HLSL vertex + pixel shaders compiled at runtime via `d3dcompiler`
 - Free-fly camera: WASD movement, right-click mouse look, scroll wheel speed
 - D3D12 debug layer enabled in Debug builds
-- Math via [GLM](https://github.com/g-truc/glm) — both fetched automatically by CMake
+- Math via [GLM](https://github.com/g-truc/glm) — fetched automatically by CMake
 
 ---
 
@@ -39,7 +40,7 @@ cmake --build out --config Debug
 out\Debug\lux.exe
 ```
 
-GLM and tinyobjloader are fetched automatically on first configure. `shaders.hlsl` and the `models/` folder are copied next to the executable as a post-build step.
+GLM, tinyobjloader, and cgltf are fetched automatically on first configure. `shaders.hlsl` and the `models/` folder are copied next to the executable as a post-build step.
 
 ---
 
@@ -67,8 +68,8 @@ GLM and tinyobjloader are fetched automatically on first configure. `shaders.hls
 - [x] Load .obj 3D model (Suzanne)
 - [x] Diffuse texture mapping (stb_image, SRV heap, runtime PNG/JPG loading)
 - [x] Phong lighting (ambient + diffuse + specular)
+- [x] Load .gltf model (Sponza) — cgltf, per-material textures, full scene traversal
 - [ ] Multiple lights + directional shadow maps
-- [ ] Load .gltf model (Sponza)
 - [ ] PBR (Physically Based Rendering)
 - [ ] Post-processing (SSAO, bloom), skybox
 - [ ] Public showcase with screenshots + recording
