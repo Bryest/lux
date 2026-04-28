@@ -98,7 +98,21 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
         uploads.push_back(std::move(up));
     }
 
-    textureCount = 2; // slots 0 and 1 reserved for fallbacks
+    // Slot 2: default metallic-roughness (roughness=0.5, metallic=0) — MR fallback
+    {
+        constexpr UINT N = 4;
+        uint32_t mr[N * N];
+        // RGBA: R=255, G=128(roughness=0.5), B=0(metallic=0), A=255
+        for (UINT i = 0; i < N*N; ++i)
+            mr[i] = 0xFF0080FF;
+        ComPtr<ID3D12Resource> tex, up;
+        UploadTex(device, cmdList, tex, up, N, N, mr);
+        MakeSrv(device, tex.Get(), srvHeap, 2, srvDescSize);
+        textures.push_back(std::move(tex));
+        uploads.push_back(std::move(up));
+    }
+
+    textureCount = 3; // slots 0-2 reserved for fallbacks
 
     std::string dir = DirOf(path);
     std::unordered_map<cgltf_image*, UINT> texCache;
@@ -191,18 +205,21 @@ bool Scene::LoadGltf(const char* path, ID3D12Device* device,
                 for (UINT i = 0; i < idxCount; ++i)
                     inds.push_back((UINT32)cgltf_accessor_read_index(prim.indices, i));
 
-                UINT albedoIdx = 0, normalIdx = 1;
+                UINT albedoIdx = 0, normalIdx = 1, mrIdx = 2;
                 if (prim.material) {
                     if (prim.material->has_pbr_metallic_roughness) {
                         auto& tv = prim.material->pbr_metallic_roughness.base_color_texture;
                         if (tv.texture && tv.texture->image)
                             albedoIdx = loadTex(tv.texture->image, 0);
+                        auto& mv = prim.material->pbr_metallic_roughness.metallic_roughness_texture;
+                        if (mv.texture && mv.texture->image)
+                            mrIdx = loadTex(mv.texture->image, 2);
                     }
                     auto& nv = prim.material->normal_texture;
                     if (nv.texture && nv.texture->image)
                         normalIdx = loadTex(nv.texture->image, 1);
                 }
-                drawCalls.push_back({ idxCount, startIndex, (INT)baseVertex, albedoIdx, normalIdx });
+                drawCalls.push_back({ idxCount, startIndex, (INT)baseVertex, albedoIdx, normalIdx, mrIdx });
             }
         }
         for (cgltf_size i = 0; i < node->children_count; ++i)
@@ -265,8 +282,10 @@ void Scene::Draw(ID3D12GraphicsCommandList* cmdList,
         CD3DX12_GPU_DESCRIPTOR_HANDLE base(srvHeap->GetGPUDescriptorHandleForHeapStart());
         CD3DX12_GPU_DESCRIPTOR_HANDLE albedo = base; albedo.Offset(dc.albedoIdx, srvDescSize);
         CD3DX12_GPU_DESCRIPTOR_HANDLE normal = base; normal.Offset(dc.normalIdx, srvDescSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE mr     = base; mr.Offset(dc.mrIdx,     srvDescSize);
         cmdList->SetGraphicsRootDescriptorTable(1, albedo);
         cmdList->SetGraphicsRootDescriptorTable(2, normal);
+        cmdList->SetGraphicsRootDescriptorTable(3, mr);
         cmdList->DrawIndexedInstanced(dc.indexCount, 1, dc.startIndex, dc.baseVertex, 0);
     }
 }

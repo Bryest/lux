@@ -1,6 +1,6 @@
 # lux
 
-![Sponza with normal maps](media/sponza-normal-maps.png)
+![Sponza PBR](media/sponza-pbr.png)
 
 Real-time DirectX 12 renderer written from scratch in C++. Built as a learning project and portfolio piece toward a graphics programmer role.
 
@@ -13,10 +13,12 @@ Real-time DirectX 12 renderer written from scratch in C++. Built as a learning p
 - Win32 window with full resize support
 - D3D12 device, double-buffered swap chain, depth buffer, and graphics PSO
 - glTF 2.0 scene loading via [cgltf](https://github.com/jkuhlmann/cgltf) — rendering the Khronos Sponza scene (~69 textures, hundreds of draw calls)
-- Per-material diffuse textures + normal maps: SRV descriptor heap, two textures bound per draw call
-- Normal mapping via TBN matrix in pixel shader — tangent-space normals transformed to world space
-- Diffuse texture loading via [stb_image](https://github.com/nothings/stb) — PNG/JPG loaded at runtime
-- Phong lighting (ambient + diffuse + specular) with a directional light
+- **PBR shading** — Cook-Torrance BRDF (GGX distribution, Smith geometry, Schlick Fresnel)
+- Metallic-roughness workflow: per-material albedo, normal map, and metallic-roughness textures
+- ACES filmic tone mapping + gamma correction (linear → sRGB)
+- Alpha cutout for masked geometry (plant leaves, chains)
+- Normal mapping via TBN matrix — tangent-space normals transformed to world space
+- Texture loading via [stb_image](https://github.com/nothings/stb) — PNG/JPG loaded at runtime
 - HLSL vertex + pixel shaders compiled at runtime via `d3dcompiler`
 - Free-fly camera: WASD movement, right-click mouse look, scroll wheel speed
 - D3D12 debug layer enabled in Debug builds
@@ -71,7 +73,8 @@ GLM, tinyobjloader, and cgltf are fetched automatically on first configure. `sha
 - [x] Phong lighting (ambient + diffuse + specular)
 - [x] Load .gltf model (Sponza) — cgltf, per-material textures, full scene traversal
 - [x] Normal mapping — TBN matrix, tangent-space normal maps per material
-- [ ] Multiple lights + directional shadow maps
-- [ ] PBR (Physically Based Rendering)
+- [x] PBR — Cook-Torrance BRDF, metallic-roughness textures, ACES tone mapping
+- [ ] Shadow maps (directional + PCF)
+- [ ] Flagship feature (DXR / Radiance Cascades)
 - [ ] Post-processing (SSAO, bloom), skybox
 - [ ] Public showcase with screenshots + recording

@@ -11,6 +11,7 @@ struct DrawCall {
     INT  baseVertex;
     UINT albedoIdx;
     UINT normalIdx;
+    UINT mrIdx; // metallic-roughness: G=roughness, B=metallic
 };
 
 struct Scene {

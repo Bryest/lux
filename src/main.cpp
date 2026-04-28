@@ -25,9 +25,10 @@ constexpr UINT kHeight          = 720;
 struct SceneConstants {
     glm::mat4 mvp;        // 64
     glm::mat4 model;      // 64
-    glm::vec4 lightDir;   // 16  xyz = dir toward light, w unused
-    glm::vec4 cameraPos;  // 16  xyz = camera world pos, w unused
-    float     _pad[24];   // 96  pad to 256
+    glm::vec4 lightDir;   // 16  xyz = dir toward light
+    glm::vec4 cameraPos;  // 16  xyz = camera world pos
+    glm::vec4 lightColor; // 16  xyz = color * intensity
+    float     _pad[20];   // 80  pad to 256
 };
 static_assert(sizeof(SceneConstants) == 256);
 
@@ -214,14 +215,16 @@ void InitScene() {
     // Root param 0: CBV at b0 (constant buffer)
     // Root param 1: descriptor table — 1 SRV at t0 (texture)
     // Static sampler at s0
-    CD3DX12_DESCRIPTOR_RANGE srvRange0, srvRange1;
+    CD3DX12_DESCRIPTOR_RANGE srvRange0, srvRange1, srvRange2;
     srvRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0 = albedo
     srvRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // t1 = normal map
+    srvRange2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2); // t2 = metallic-roughness
 
-    CD3DX12_ROOT_PARAMETER rp[3];
+    CD3DX12_ROOT_PARAMETER rp[4];
     rp[0].InitAsConstantBufferView(0);
     rp[1].InitAsDescriptorTable(1, &srvRange0, D3D12_SHADER_VISIBILITY_PIXEL);
     rp[2].InitAsDescriptorTable(1, &srvRange1, D3D12_SHADER_VISIBILITY_PIXEL);
+    rp[3].InitAsDescriptorTable(1, &srvRange2, D3D12_SHADER_VISIBILITY_PIXEL);
 
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -233,7 +236,7 @@ void InitScene() {
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC rsd;
-    rsd.Init(3, rp, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    rsd.Init(4, rp, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     ComPtr<ID3DBlob> rsBlob, rsErr;
     D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr);
     g_device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature));
@@ -355,8 +358,9 @@ void Render(float t) {
     SceneConstants sc = {};
     sc.mvp       = proj * view * model;
     sc.model     = model;
-    sc.lightDir  = glm::vec4(glm::normalize(glm::vec3(1.0f, 2.0f, -1.0f)), 0.0f);
-    sc.cameraPos = glm::vec4(g_camera.pos, 0.0f);
+    sc.lightDir   = glm::vec4(glm::normalize(glm::vec3(1.0f, 2.0f, -1.0f)), 0.0f);
+    sc.cameraPos  = glm::vec4(g_camera.pos, 0.0f);
+    sc.lightColor = glm::vec4(3.0f, 2.8f, 2.5f, 0.0f); // warm sunlight
     memcpy(g_cbMapped, &sc, sizeof(sc));
 
     ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
