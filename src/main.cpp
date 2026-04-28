@@ -26,6 +26,7 @@ constexpr UINT kWidth           = 1280;
 constexpr UINT kHeight          = 720;
 constexpr UINT kShadowMapSize   = 4096;
 constexpr UINT kShadowSrvSlot   = 255; // fixed slot in g_srvHeap
+constexpr UINT kDepthSrvSlot    = 254;
 
 struct SceneConstants {
     glm::mat4 mvp;        // 64
@@ -37,6 +38,18 @@ struct SceneConstants {
     float     _pad[4];    // 16  pad to 256
 };
 static_assert(sizeof(SceneConstants) == 256);
+
+struct VolumetricConstants {
+    glm::mat4 invViewProj;  // 64
+    glm::mat4 lightVP;      // 64
+    glm::vec4 cameraPos;    // 16
+    glm::vec4 lightDir;     // 16
+    glm::vec4 lightColor;   // 16
+    float     scatterCoeff; // 4
+    float     maxDist;      // 4
+    float     _pad[18];     // 72 → total 256
+};
+static_assert(sizeof(VolumetricConstants) == 256);
 
 struct Camera {
     glm::vec3 pos   = { 0.0f, 2.0f,  0.0f };
@@ -88,12 +101,21 @@ ComPtr<ID3D12PipelineState>  g_shadowPipelineState;
 ComPtr<ID3D12Resource>       g_shadowConstantBuffer;
 UINT8*                       g_shadowCbMapped = nullptr;
 
+// --- Volumetric state ---
+ComPtr<ID3D12RootSignature>  g_volRootSignature;
+ComPtr<ID3D12PipelineState>  g_volPSO;
+ComPtr<ID3D12Resource>       g_volCB;
+UINT8*                       g_volCbMapped = nullptr;
+
 // --- Scene state ---
 Camera    g_camera;
 Scene     g_scene;
 UINT      g_srvDescSize = 0;
 float     g_moveSpeed   = 10.0f;
 glm::vec3 g_lightDir    = glm::vec3(0.0f, 2.0f, -0.45f); // editable via ImGui
+bool  g_enableVol   = true;
+float g_volScatter  = 0.02f;
+float g_volMaxDist  = 30.0f;
 
 // --- ImGui ---
 ComPtr<ID3D12DescriptorHeap> g_imguiSrvHeap;
@@ -117,7 +139,7 @@ void CreateDepthBuffer(UINT w, UINT h) {
     dd.Height               = h;
     dd.DepthOrArraySize     = 1;
     dd.MipLevels            = 1;
-    dd.Format               = DXGI_FORMAT_D32_FLOAT;
+    dd.Format               = DXGI_FORMAT_R32_TYPELESS; // typeless: can be DSV (D32) and SRV (R32)
     dd.SampleDesc.Count     = 1;
     dd.Flags                = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
@@ -129,8 +151,23 @@ void CreateDepthBuffer(UINT w, UINT h) {
     g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE,
         &dd, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&g_depthBuffer));
 
-    g_device->CreateDepthStencilView(g_depthBuffer.Get(), nullptr,
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format        = DXGI_FORMAT_D32_FLOAT;
+    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    g_device->CreateDepthStencilView(g_depthBuffer.Get(), &dsvDesc,
         g_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    // Recreate depth SRV on resize (slot kDepthSrvSlot)
+    if (g_srvHeap && g_srvDescSize > 0) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format                  = DXGI_FORMAT_R32_FLOAT;
+        sd.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels     = 1;
+        CD3DX12_CPU_DESCRIPTOR_HANDLE h(g_srvHeap->GetCPUDescriptorHandleForHeapStart());
+        h.Offset(kDepthSrvSlot, g_srvDescSize);
+        g_device->CreateShaderResourceView(g_depthBuffer.Get(), &sd, h);
+    }
 }
 
 void OnResize(UINT w, UINT h) {
@@ -310,6 +347,79 @@ void InitShadows() {
     g_device->CreateGraphicsPipelineState(&spd, IID_PPV_ARGS(&g_shadowPipelineState));
 }
 
+void InitVolumetrics() {
+    // CBV for VolumetricConstants
+    {
+        auto chp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+        auto cbd = CD3DX12_RESOURCE_DESC::Buffer(sizeof(VolumetricConstants));
+        g_device->CreateCommittedResource(&chp, D3D12_HEAP_FLAG_NONE, &cbd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_volCB));
+        CD3DX12_RANGE r(0, 0);
+        g_volCB->Map(0, &r, (void**)&g_volCbMapped);
+    }
+
+    // Root signature: CBV (b0) + descriptor table (t0=depth, t1=shadowmap)
+    {
+        CD3DX12_DESCRIPTOR_RANGE srvRange;
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0); // t0, t1
+
+        CD3DX12_ROOT_PARAMETER rp[2];
+        rp[0].InitAsConstantBufferView(0);
+        rp[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+        D3D12_STATIC_SAMPLER_DESC sampler = {};
+        sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        sampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.MaxLOD           = D3D12_FLOAT32_MAX;
+        sampler.ShaderRegister   = 0;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        CD3DX12_ROOT_SIGNATURE_DESC rsd;
+        rsd.Init(2, rp, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        ComPtr<ID3DBlob> rsBlob, rsErr;
+        D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr);
+        g_device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(),
+            IID_PPV_ARGS(&g_volRootSignature));
+    }
+
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    ComPtr<ID3DBlob> vsBlob, psBlob, errBlob;
+    D3DCompileFromFile(L"vollight.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", flags, 0, &vsBlob, &errBlob);
+    D3DCompileFromFile(L"vollight.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", flags, 0, &psBlob, &errBlob);
+
+    auto blendDesc = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    blendDesc.RenderTarget[0].BlendEnable    = TRUE;
+    blendDesc.RenderTarget[0].SrcBlend       = D3D12_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlend      = D3D12_BLEND_ONE;
+    blendDesc.RenderTarget[0].BlendOp        = D3D12_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    blendDesc.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    auto noDepth = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    noDepth.DepthEnable = FALSE;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature        = g_volRootSignature.Get();
+    pd.VS                    = CD3DX12_SHADER_BYTECODE(vsBlob.Get());
+    pd.PS                    = CD3DX12_SHADER_BYTECODE(psBlob.Get());
+    pd.RasterizerState       = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pd.BlendState            = blendDesc;
+    pd.DepthStencilState     = noDepth;
+    pd.SampleMask            = UINT_MAX;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets      = 1;
+    pd.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pd.SampleDesc.Count      = 1;
+    g_device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_volPSO));
+}
+
 void InitScene() {
     CD3DX12_DESCRIPTOR_RANGE srvRange0, srvRange1, srvRange2, srvRange3;
     srvRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0 = albedo
@@ -401,6 +511,20 @@ void InitScene() {
     }
 
     InitShadows();
+
+    // Depth SRV at slot kDepthSrvSlot (CreateDepthBuffer ran before g_srvHeap existed)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format                  = DXGI_FORMAT_R32_FLOAT;
+        sd.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels     = 1;
+        CD3DX12_CPU_DESCRIPTOR_HANDLE h(g_srvHeap->GetCPUDescriptorHandleForHeapStart());
+        h.Offset(kDepthSrvSlot, g_srvDescSize);
+        g_device->CreateShaderResourceView(g_depthBuffer.Get(), &sd, h);
+    }
+
+    InitVolumetrics();
 
     // Shadow map SRV at slot 255
     {
@@ -532,7 +656,7 @@ void Render(float t) {
     g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_scene.Draw(g_commandList.Get(), g_srvHeap.Get(), g_srvDescSize);
 
-    // === IMGUI PASS ===
+    // === IMGUI CPU (build UI before god ray GPU commands) ===
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -545,9 +669,58 @@ void Render(float t) {
     ImGui::SliderFloat("X##sun", &g_lightDir.x, -2.0f, 2.0f);
     ImGui::SliderFloat("Y##sun", &g_lightDir.y, 0.0f,  2.0f);
     ImGui::SliderFloat("Z##sun", &g_lightDir.z, -2.0f, 2.0f);
+    ImGui::Separator();
+    ImGui::Checkbox("Volumetric Light", &g_enableVol);
+    if (g_enableVol) {
+        ImGui::SliderFloat("Scatter",  &g_volScatter, 0.001f, 0.1f);
+        ImGui::SliderFloat("Max Dist", &g_volMaxDist, 5.0f, 100.0f);
+    }
     ImGui::End();
-
     ImGui::Render();
+
+    // === VOLUMETRIC PASS ===
+    if (g_enableVol) {
+        auto depthToSrv = CD3DX12_RESOURCE_BARRIER::Transition(
+            g_depthBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        g_commandList->ResourceBarrier(1, &depthToSrv);
+
+        VolumetricConstants vc = {};
+        vc.invViewProj  = glm::inverse(proj * view);
+        vc.lightVP      = lightVP;
+        vc.cameraPos    = glm::vec4(g_camera.pos, 0.0f);
+        vc.lightDir     = glm::vec4(lightDirV, 0.0f);
+        vc.lightColor   = glm::vec4(3.0f, 2.8f, 2.5f, 0.0f);
+        vc.scatterCoeff = g_volScatter;
+        vc.maxDist      = g_volMaxDist;
+        memcpy(g_volCbMapped, &vc, sizeof(vc));
+
+        g_commandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        g_commandList->RSSetViewports(1, &g_viewport);
+        g_commandList->RSSetScissorRects(1, &g_scissor);
+
+        g_commandList->SetGraphicsRootSignature(g_volRootSignature.Get());
+        g_commandList->SetPipelineState(g_volPSO.Get());
+
+        ID3D12DescriptorHeap* srvHeaps[] = { g_srvHeap.Get() };
+        g_commandList->SetDescriptorHeaps(1, srvHeaps);
+        g_commandList->SetGraphicsRootConstantBufferView(0, g_volCB->GetGPUVirtualAddress());
+
+        // Depth at slot 254, shadow map at slot 255 — contiguous, bind as table of 2
+        CD3DX12_GPU_DESCRIPTOR_HANDLE volSrv(g_srvHeap->GetGPUDescriptorHandleForHeapStart());
+        volSrv.Offset(kDepthSrvSlot, g_srvDescSize);
+        g_commandList->SetGraphicsRootDescriptorTable(1, volSrv);
+
+        g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_commandList->DrawInstanced(3, 1, 0, 0);
+
+        auto depthToWrite = CD3DX12_RESOURCE_BARRIER::Transition(
+            g_depthBuffer.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        g_commandList->ResourceBarrier(1, &depthToWrite);
+    }
+
+    // === IMGUI GPU ===
     ID3D12DescriptorHeap* imguiHeaps[] = { g_imguiSrvHeap.Get() };
     g_commandList->SetDescriptorHeaps(1, imguiHeaps);
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_commandList.Get());

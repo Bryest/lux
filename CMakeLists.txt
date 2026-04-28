@@ -74,6 +74,9 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/src/shadow.hlsl
         $<TARGET_FILE_DIR:${PROJECT_NAME}>/shadow.hlsl
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vollight.hlsl
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>/vollight.hlsl
     COMMAND ${CMAKE_COMMAND} -E make_directory
         $<TARGET_FILE_DIR:${PROJECT_NAME}>/models
     COMMAND ${CMAKE_COMMAND} -E copy_directory
