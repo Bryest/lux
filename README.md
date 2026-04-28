@@ -1,6 +1,6 @@
 # lux
 
-![Sponza](media/sponza.png)
+![Sponza with normal maps](media/sponza-normal-maps.png)
 
 Real-time DirectX 12 renderer written from scratch in C++. Built as a learning project and portfolio piece toward a graphics programmer role.
 
@@ -13,7 +13,8 @@ Real-time DirectX 12 renderer written from scratch in C++. Built as a learning p
 - Win32 window with full resize support
 - D3D12 device, double-buffered swap chain, depth buffer, and graphics PSO
 - glTF 2.0 scene loading via [cgltf](https://github.com/jkuhlmann/cgltf) — rendering the Khronos Sponza scene (~69 textures, hundreds of draw calls)
-- Per-material diffuse textures: SRV descriptor heap, one texture bind per draw call
+- Per-material diffuse textures + normal maps: SRV descriptor heap, two textures bound per draw call
+- Normal mapping via TBN matrix in pixel shader — tangent-space normals transformed to world space
 - Diffuse texture loading via [stb_image](https://github.com/nothings/stb) — PNG/JPG loaded at runtime
 - Phong lighting (ambient + diffuse + specular) with a directional light
 - HLSL vertex + pixel shaders compiled at runtime via `d3dcompiler`
@@ -69,6 +70,7 @@ GLM, tinyobjloader, and cgltf are fetched automatically on first configure. `sha
 - [x] Diffuse texture mapping (stb_image, SRV heap, runtime PNG/JPG loading)
 - [x] Phong lighting (ambient + diffuse + specular)
 - [x] Load .gltf model (Sponza) — cgltf, per-material textures, full scene traversal
+- [x] Normal mapping — TBN matrix, tangent-space normal maps per material
 - [ ] Multiple lights + directional shadow maps
 - [ ] PBR (Physically Based Rendering)
 - [ ] Post-processing (SSAO, bloom), skybox
